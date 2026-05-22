@@ -5,6 +5,7 @@ from .eigen import Eigen
 from .lu import LU
 from .qr import QR
 from .svd import SVD
+from utils.valiadators import matrix_notes
 
 
 class Methods:
@@ -20,22 +21,4 @@ class Methods:
 
         if matrix.ndim != 2:
             raise ValueError("Input must be a 2D matrix.")
-
-        rows, cols = matrix.shape
-        notes = [f"Shape: {rows} x {cols}"]
-
-        if rows == cols:
-            rank = np.linalg.matrix_rank(matrix)
-            determinant = float(np.linalg.det(matrix))
-            notes.append(f"Rank: {rank}")
-            notes.append(f"Determinant: {determinant:.6f}")
-            if np.isclose(determinant, 0.0):
-                notes.append("Matrix is singular.")
-            else:
-                notes.append("Matrix is non-singular.")
-        else:
-            rank = np.linalg.matrix_rank(matrix)
-            notes.append(f"Rank: {rank}")
-            notes.append("Matrix is not square, so determinant and singularity are not defined.")
-
-        return notes
+        return matrix_notes(matrix)

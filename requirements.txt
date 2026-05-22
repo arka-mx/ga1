@@ -1,6 +1,5 @@
-matplotlib
-numpy
-pandas
-scipy
-seaborn
 streamlit
+numpy
+scipy
+pandas
+plotly

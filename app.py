@@ -1,743 +1,555 @@
-import matplotlib.pyplot as plt
-from matplotlib import colors as mcolors
-from matplotlib import patheffects as pe
 import numpy as np
 import pandas as pd
-import seaborn as sns
 import streamlit as st
 
-from decomposition.methods import Methods
-from utils.valiadators import (
-    METHOD_REQUIREMENTS,
-    build_default_dataframe,
-    dataframe_to_matrix,
-    summarize_matrix,
-    validate_for_method,
-)
+from decomposition.lu import compute_lu, reconstruct_lu
+from decomposition.qr import compute_qr, reconstruct_qr
+from decomposition.svd import compute_svd, reconstruct_svd
+from decomposition.eigen import compute_eigen, reconstruct_eigen
+from decomposition.cholesky import compute_cholesky, reconstruct_cholesky
+from decomposition.pca import compute_pca
 
+from utils.validators import validate_matrix, dataframe_to_matrix, matrix_properties
+from utils.helpers import (
+    plot_heatmap,
+    plot_heatmap_highlighted,
+    plot_explained_variance,
+    generate_random_matrix,
+    time_execution,
+)
 
 st.set_page_config(
     page_title="Matrix Decomposition Studio",
-    page_icon="M",
+    page_icon="🧮",
     layout="wide",
 )
 
+st.markdown("""
+<style>
 
-methods = Methods()
+/* ── overall page ── */
+.main .block-container { padding-top: 1.5rem; padding-bottom: 2rem; }
 
-DECOMPOSITION_OPTIONS = {
-    "Cholesky": {
-        "fn": methods.cholesky.cd,
-        "subtitle": "For symmetric positive definite matrices.",
-    },
-    "Eigenvalue": {
-        "fn": methods.eigen.evd,
-        "subtitle": "Breaks a square matrix into eigenvalues and eigenvectors.",
-    },
-    "LU": {
-        "fn": methods.lu.lu,
-        "subtitle": "Splits a square matrix into permutation, lower, and upper factors.",
-    },
-    "QR": {
-        "fn": methods.qr.qr,
-        "subtitle": "Produces an orthogonal matrix and an upper triangular matrix.",
-    },
-    "SVD": {
-        "fn": methods.svd.svd,
-        "subtitle": "Works for any numeric matrix and exposes its singular values.",
-    },
+/* ── Python-Tutor style step panel ── */
+.tutor-step-header {
+    background: #1e2a3a;
+    color: #7ecfff;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.82rem;
+    padding: 6px 14px;
+    border-radius: 6px 6px 0 0;
+    border: 1px solid #2e4060;
+    border-bottom: none;
+    letter-spacing: 0.05em;
+}
+.tutor-step-body {
+    background: #0d1117;
+    color: #e6edf3;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.92rem;
+    padding: 14px 18px;
+    border: 1px solid #2e4060;
+    border-top: none;
+    border-radius: 0 0 0 0;
+    white-space: pre-wrap;
+    line-height: 1.7;
+    min-height: 56px;
+}
+.tutor-formula-header {
+    background: #2a2000;
+    color: #f0c040;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.82rem;
+    padding: 6px 14px;
+    border: 1px solid #5a4500;
+    border-bottom: none;
+    letter-spacing: 0.05em;
+}
+.tutor-formula-body {
+    background: #1a1400;
+    color: #ffe082;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.9rem;
+    padding: 14px 18px;
+    border: 1px solid #5a4500;
+    border-top: none;
+    border-radius: 0 0 6px 6px;
+    white-space: pre-wrap;
+    line-height: 1.8;
+    min-height: 52px;
 }
 
+/* ── prop tags ── */
+.prop-row { margin-top: 6px; }
+.prop-tag {
+    display: inline-block;
+    background: #1e3050;
+    color: #7ecfff;
+    border-radius: 4px;
+    padding: 2px 10px;
+    margin: 3px 3px 0 0;
+    font-size: 0.78rem;
+    font-family: monospace;
+}
 
-def init_session_state():
-    if "matrix_df" not in st.session_state:
-        st.session_state.matrix_df = build_default_dataframe(3, 3)
-    if "matrix_shape" not in st.session_state:
-        st.session_state.matrix_shape = (3, 3)
-    if "result_payload" not in st.session_state:
-        st.session_state.result_payload = None
+/* ── step nav ── */
+.step-nav-label {
+    font-family: monospace;
+    color: #888;
+    font-size: 0.8rem;
+    margin-bottom: 4px;
+}
+
+/* ── matrix label ── */
+.matrix-label {
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.85rem;
+    color: #7ecfff;
+    background: #1e2a3a;
+    padding: 3px 10px;
+    border-radius: 4px 4px 0 0;
+    display: inline-block;
+    margin-bottom: -4px;
+}
+
+/* ── section divider ── */
+.tutor-section {
+    border-top: 1px solid #2e4060;
+    margin: 18px 0 10px 0;
+    padding-top: 10px;
+}
+
+</style>
+""", unsafe_allow_html=True)
 
 
-def resize_dataframe(dataframe, rows, cols):
-    resized = build_default_dataframe(rows, cols)
-    overlap_rows = min(rows, dataframe.shape[0])
-    overlap_cols = min(cols, dataframe.shape[1])
+# ── helper to render a matrix table cleanly ──────────────────────────────────
 
-    if overlap_rows and overlap_cols:
-        resized.iloc[:overlap_rows, :overlap_cols] = dataframe.iloc[
-            :overlap_rows, :overlap_cols
-        ].to_numpy()
-
-    return resized
-
-
-def generate_random_dataframe(rows, cols, min_value, max_value, integers_only):
-    if integers_only:
-        values = np.random.randint(min_value, max_value + 1, size=(rows, cols))
+def show_matrix(mat, label=None):
+    arr = np.array(mat, dtype=float) if not np.iscomplexobj(mat) else np.array(mat)
+    if arr.ndim == 1:
+        arr = arr.reshape(1, -1)
+    if label:
+        st.markdown(f'<div class="matrix-label">{label}</div>', unsafe_allow_html=True)
+    if np.iscomplexobj(arr):
+        st.dataframe(pd.DataFrame(arr).astype(str), use_container_width=True)
     else:
-        values = np.random.uniform(min_value, max_value, size=(rows, cols))
-        values = np.round(values, 4)
+        st.dataframe(pd.DataFrame(arr).style.format("{:.4f}"), use_container_width=True)
 
-    return pd.DataFrame(
-        values,
-        columns=[f"C{index + 1}" for index in range(cols)],
-    )
 
+# ── sidebar ───────────────────────────────────────────────────────────────────
 
-def sync_matrix_shape(rows, cols):
-    target_shape = (rows, cols)
-    if st.session_state.matrix_shape != target_shape:
-        st.session_state.matrix_df = resize_dataframe(
-            st.session_state.matrix_df,
-            rows,
-            cols,
-        )
-        st.session_state.matrix_shape = target_shape
-        st.session_state.result_payload = None
+st.sidebar.header("1 · Matrix Input")
 
-
-def format_component(value):
-    array = np.array(value)
-    array = np.real_if_close(array, tol=1000)
-
-    if array.ndim == 1:
-        array = array.reshape(-1, 1)
-
-    row_labels = [f"R{index + 1}" for index in range(array.shape[0])]
-    col_labels = [f"C{index + 1}" for index in range(array.shape[1])]
-
-    if np.iscomplexobj(array):
-        formatter = np.vectorize(
-            lambda item: f"{item.real:.4f}{item.imag:+.4f}j"
-            if abs(item.imag) > 1e-9
-            else f"{item.real:.4f}"
-        )
-        display = pd.DataFrame(formatter(array), index=row_labels, columns=col_labels)
-    else:
-        display = pd.DataFrame(
-            np.round(array.astype(float), 4),
-            index=row_labels,
-            columns=col_labels,
-        )
-
-    return display
-
-
-def render_component(label, value):
-    st.markdown(
-        f"""
-        <div class="section-label">
-            <span>{label}</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    table_col, heatmap_col = st.columns([0.9, 1.1], gap="large")
-    with table_col:
-        st.dataframe(format_component(value), use_container_width=True)
-    with heatmap_col:
-        render_heatmap(label, value)
-
-
-def get_heatmap_style(plot_values, label):
-    min_value = float(np.min(plot_values))
-    max_value = float(np.max(plot_values))
-    is_signed = min_value < 0 < max_value
-    is_binary = np.all(np.isin(np.unique(np.round(plot_values, 10)), [0.0, 1.0]))
-
-    if is_binary or label == "P":
-        cmap = sns.blend_palette(
-            ["#eff6ff", "#93c5fd", "#2563eb", "#0f172a"],
-            as_cmap=True,
-        )
-        norm = mcolors.Normalize(vmin=0.0, vmax=1.0)
-    elif is_signed:
-        limit = max(abs(min_value), abs(max_value))
-        if np.isclose(limit, 0.0):
-            limit = 1.0
-        cmap = sns.diverging_palette(
-            12,
-            220,
-            s=95,
-            l=38,
-            center="light",
-            as_cmap=True,
-        )
-        norm = mcolors.TwoSlopeNorm(vmin=-limit, vcenter=0.0, vmax=limit)
-    else:
-        if np.isclose(min_value, max_value):
-            min_value -= 1.0
-            max_value += 1.0
-        cmap = sns.blend_palette(
-            ["#f8fafc", "#bae6fd", "#2dd4bf", "#0f766e", "#0f172a"],
-            as_cmap=True,
-        )
-        norm = mcolors.Normalize(vmin=min_value, vmax=max_value)
-
-    return cmap, norm
-
-
-def style_heatmap_annotations(heatmap, plot_values, cmap, norm):
-    for text, value in zip(heatmap.texts, plot_values.flatten(order="C")):
-        rgba = cmap(norm(value))
-        luminance = 0.2126 * rgba[0] + 0.7152 * rgba[1] + 0.0722 * rgba[2]
-        text_color = "#f8fafc" if luminance < 0.48 else "#0f172a"
-        stroke_color = "#0f172a" if text_color == "#f8fafc" else "#ffffff"
-        text.set_color(text_color)
-        text.set_fontweight("bold")
-        text.set_fontsize(9)
-        text.set_path_effects(
-            [pe.withStroke(linewidth=1.35, foreground=stroke_color, alpha=0.55)]
-        )
-
-
-def render_heatmap(label, value):
-    array = np.array(value)
-    array = np.real_if_close(array, tol=1000)
-
-    if array.ndim == 1:
-        array = array.reshape(-1, 1)
-
-    if np.iscomplexobj(array):
-        st.caption(
-            f"{label} heatmap uses the real component because heatmaps require real values."
-        )
-        plot_values = array.real.astype(float)
-    else:
-        plot_values = array.astype(float)
-
-    cmap, norm = get_heatmap_style(plot_values, label)
-    figure_width = max(5.4, array.shape[1] * 1.14)
-    figure_height = max(3.6, array.shape[0] * 0.86)
-    fig, ax = plt.subplots(figsize=(figure_width, figure_height))
-    fig.patch.set_facecolor("#f8fbff")
-    ax.set_facecolor("#f8fbff")
-
-    heatmap = sns.heatmap(
-        plot_values,
-        annot=True,
-        fmt=".2f",
-        cmap=cmap,
-        norm=norm,
-        linewidths=1.2,
-        linecolor="#f8fafc",
-        cbar=True,
-        square=False,
-        annot_kws={"fontsize": 9, "fontweight": "bold"},
-        cbar_kws={"shrink": 0.82, "pad": 0.02},
-        ax=ax,
-    )
-
-    style_heatmap_annotations(heatmap, plot_values, cmap, norm)
-
-    ax.set_title(
-        f"{label} Heatmap",
-        color="#111827",
-        fontsize=13,
-        pad=14,
-        fontweight="bold",
-    )
-    ax.set_xlabel("Columns", color="#475569", fontsize=10, labelpad=10)
-    ax.set_ylabel("Rows", color="#475569", fontsize=10, labelpad=10)
-    ax.set_xticklabels(
-        [f"C{index + 1}" for index in range(array.shape[1])],
-        rotation=0,
-        fontsize=9,
-        color="#334155",
-    )
-    ax.set_yticklabels(
-        [f"R{index + 1}" for index in range(array.shape[0])],
-        rotation=0,
-        fontsize=9,
-        color="#334155",
-    )
-    ax.tick_params(axis="both", length=0)
-    for spine in ax.spines.values():
-        spine.set_visible(False)
-
-    colorbar = heatmap.collections[0].colorbar
-    colorbar.outline.set_visible(False)
-    colorbar.ax.tick_params(labelsize=9, colors="#334155", length=0)
-    colorbar.ax.set_facecolor("#f8fbff")
-
-    plt.tight_layout()
-    st.pyplot(fig, use_container_width=True)
-    plt.close(fig)
-
-
-def render_chip(text, variant="neutral"):
-    st.markdown(
-        f'<span class="chip chip-{variant}">{text}</span>',
-        unsafe_allow_html=True,
-    )
-
-
-def render_summary_cards(summary):
-    cards = [
-        ("Shape", summary["shape"]),
-        ("Rank", str(summary["rank"])),
-        ("Square", "Yes" if summary["is_square"] else "No"),
-        (
-            "Determinant",
-            f"{summary['determinant']:.4f}"
-            if summary["determinant"] is not None
-            else "N/A",
-        ),
-    ]
-
-    columns = st.columns(len(cards), gap="small")
-    for column, (label, value) in zip(columns, cards):
-        with column:
-            st.markdown(
-                f"""
-                <div class="metric-card">
-                    <div class="metric-label">{label}</div>
-                    <div class="metric-value">{value}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-
-def render_method_requirements(method_name):
-    st.markdown("#### Method Requirements")
-    for requirement in METHOD_REQUIREMENTS[method_name]:
-        render_chip(requirement, "info")
-
-
-def build_reconstruction(method_name, components):
-    component_map = {label: np.array(value) for label, value in components}
-
-    if method_name == "Cholesky":
-        return component_map["L"] @ component_map["L^T"]
-    if method_name == "LU":
-        return component_map["P"] @ component_map["L"] @ component_map["U"]
-    if method_name == "QR":
-        return component_map["Q"] @ component_map["R"]
-    if method_name == "SVD":
-        return component_map["U"] @ component_map["Sigma"] @ component_map["V^T"]
-    if method_name == "Eigenvalue":
-        eigenvectors = component_map["Eigenvectors"]
-        eigenvalues = component_map["Eigenvalues"]
-        diagonal = np.diag(eigenvalues)
-        return eigenvectors @ diagonal @ np.linalg.pinv(eigenvectors)
-
-    return None
-
-
-def render_validation_panel(validation):
-    st.markdown("#### Validation")
-
-    if validation["is_valid"]:
-        st.success("Matrix satisfies the selected decomposition requirements.")
-    else:
-        st.error("Matrix does not satisfy the selected decomposition requirements yet.")
-
-    for warning in validation["warnings"]:
-        st.warning(warning)
-
-    for error in validation["errors"]:
-        st.error(error)
-
-    summary = validation["summary"]
-    status_pairs = [
-        ("Finite values", summary["has_finite_values"]),
-        ("Square matrix", summary["is_square"]),
-        (
-            "Symmetric matrix",
-            summary["is_symmetric"] if summary["is_square"] else None,
-        ),
-        (
-            "Positive definite",
-            summary["is_positive_definite"] if summary["is_square"] else None,
-        ),
-    ]
-
-    for label, state in status_pairs:
-        if state is True:
-            render_chip(f"{label}: Yes", "success")
-        elif state is False:
-            render_chip(f"{label}: No", "danger")
-        else:
-            render_chip(f"{label}: N/A", "neutral")
-
-
-init_session_state()
-
-st.markdown(
-    """
-    <style>
-    @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap');
-
-    html, body, [class*="css"] {
-        font-family: "Space Grotesk", sans-serif;
-    }
-
-    .stApp {
-        background:
-            radial-gradient(circle at top left, rgba(14, 165, 233, 0.22), transparent 32%),
-            radial-gradient(circle at 88% 12%, rgba(34, 197, 94, 0.16), transparent 30%),
-            linear-gradient(180deg, #f6fbff 0%, #f0f7f3 100%);
-    }
-
-    .block-container {
-        padding-top: 2rem;
-        padding-bottom: 2.5rem;
-    }
-
-    .hero-shell {
-        background:
-            radial-gradient(circle at top right, rgba(14, 165, 233, 0.18), transparent 32%),
-            radial-gradient(circle at bottom left, rgba(34, 197, 94, 0.14), transparent 30%),
-            linear-gradient(135deg, rgba(255, 255, 255, 0.96), rgba(241, 245, 249, 0.96));
-        border-radius: 28px;
-        padding: 1.8rem;
-        color: #0f172a;
-        box-shadow: 0 22px 60px rgba(15, 23, 42, 0.18);
-        margin-bottom: 1.2rem;
-        position: relative;
-        overflow: hidden;
-        border: 1px solid rgba(148, 163, 184, 0.2);
-    }
-
-    .hero-shell::after {
-        content: "";
-        position: absolute;
-        inset: auto -10% -40% auto;
-        width: 260px;
-        height: 260px;
-        background: rgba(125, 211, 252, 0.18);
-        border-radius: 50%;
-        filter: blur(8px);
-    }
-
-    .hero-title {
-        font-size: 2.1rem;
-        font-weight: 700;
-        margin: 0 0 0.4rem 0;
-        letter-spacing: -0.03em;
-        color: #000000;
-    }
-
-    .hero-copy {
-        color: #1e293b;
-        margin: 0;
-        max-width: 700px;
-        line-height: 1.55;
-    }
-
-    h1, h2, h3, h4, h5, h6 {
-        color: #000000 !important;
-    }
-
-    label, .stNumberInput label, .stSelectbox label {
-        color: #000000 !important;
-    }
-
-    .glass-panel {
-        background: rgba(255, 255, 255, 0.74);
-        border: 1px solid rgba(148, 163, 184, 0.18);
-        border-radius: 24px;
-        padding: 1.1rem 1.2rem 1.2rem 1.2rem;
-        box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08);
-        backdrop-filter: blur(12px);
-    }
-
-    .metric-card {
-        background: rgba(248, 250, 252, 0.95);
-        border: 1px solid rgba(148, 163, 184, 0.18);
-        border-radius: 18px;
-        padding: 0.9rem 1rem;
-        min-height: 88px;
-    }
-
-    .metric-label {
-        color: #475569;
-        font-size: 0.88rem;
-        margin-bottom: 0.35rem;
-    }
-
-    .metric-value {
-        color: #0f172a;
-        font-size: 1.2rem;
-        font-weight: 700;
-    }
-
-    .section-label {
-        margin: 0.9rem 0 0.4rem 0;
-        color: #000000;
-        font-weight: 600;
-    }
-
-    .chip {
-        display: inline-flex;
-        align-items: center;
-        padding: 0.35rem 0.72rem;
-        border-radius: 999px;
-        margin: 0.15rem 0.35rem 0.15rem 0;
-        font-size: 0.85rem;
-        font-weight: 600;
-    }
-
-    .chip-neutral {
-        background: rgba(226, 232, 240, 0.8);
-        color: #334155;
-    }
-
-    .chip-info {
-        background: rgba(224, 242, 254, 0.95);
-        color: #075985;
-    }
-
-    .chip-success {
-        background: rgba(220, 252, 231, 0.96);
-        color: #166534;
-    }
-
-    .chip-danger {
-        background: rgba(254, 226, 226, 0.96);
-        color: #b91c1c;
-    }
-
-    .soft-note {
-        background: rgba(248, 250, 252, 0.92);
-        border-radius: 18px;
-        border: 1px solid rgba(148, 163, 184, 0.16);
-        padding: 1rem;
-        color: #334155;
-    }
-
-    .stButton > button {
-        border-radius: 16px;
-        min-height: 3rem;
-        font-weight: 700;
-        transition: transform 0.18s ease, box-shadow 0.18s ease;
-        box-shadow: 0 14px 24px rgba(15, 23, 42, 0.12);
-    }
-
-    .stButton > button:hover {
-        transform: translateY(-1px);
-        box-shadow: 0 18px 30px rgba(15, 23, 42, 0.16);
-    }
-
-    button[data-baseweb="tab"] {
-        color: #0f172a;
-        font-weight: 700;
-    }
-
-    button[data-baseweb="tab"]:nth-child(1),
-    button[data-baseweb="tab"]:nth-child(2) {
-        color: #dc2626;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
+input_method = st.sidebar.radio(
+    "How do you want to enter the matrix?",
+    ["Manual Entry", "CSV Upload", "Random Generation"],
 )
 
-st.markdown(
-    """
-    <div class="hero-shell">
-        <div class="hero-title">Matrix Decomposition Studio</div>
-        <p class="hero-copy">
-            Build a matrix interactively, validate it against decomposition rules in real time,
-            and inspect clean factorization results with reconstruction checks.
-        </p>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+matrix = None
 
-left_col, right_col = st.columns([1.02, 1.38], gap="large")
-
-with left_col:
-    st.markdown('<div class="glass-panel">', unsafe_allow_html=True)
-    st.subheader("Matrix Builder")
-    control_cols = st.columns(2, gap="small")
-    with control_cols[0]:
-        row_count = int(
-            st.number_input("Rows", min_value=1, max_value=10, value=3, step=1)
-        )
-    with control_cols[1]:
-        col_count = int(
-            st.number_input("Columns", min_value=1, max_value=10, value=3, step=1)
-        )
-
-    sync_matrix_shape(row_count, col_count)
-
-    decomposition_name = st.selectbox(
-        "Decomposition method",
-        list(DECOMPOSITION_OPTIONS.keys()),
-        help="Choose the factorization you want to apply to the matrix.",
+if input_method == "Manual Entry":
+    rows = int(st.sidebar.number_input("Rows", 1, 10, 3))
+    cols = int(st.sidebar.number_input("Columns", 1, 10, 3))
+    default_df = pd.DataFrame(
+        np.zeros((rows, cols)),
+        columns=[f"C{c+1}" for c in range(cols)],
     )
-    st.caption(DECOMPOSITION_OPTIONS[decomposition_name]["subtitle"])
+    edited = st.sidebar.data_editor(default_df, num_rows="fixed", key="manual_editor")
+    try:
+        m = dataframe_to_matrix(edited)
+        ok, msg, matrix = validate_matrix(m)
+        if not ok:
+            st.sidebar.error(msg)
+    except ValueError as e:
+        st.sidebar.error(str(e))
 
-    render_method_requirements(decomposition_name)
-
-    st.markdown("#### Random Fill")
-    random_cols = st.columns(3, gap="small")
-    with random_cols[0]:
-        random_min = int(
-            st.number_input(
-                "Min value",
-                min_value=-100,
-                max_value=100,
-                value=-5,
-                step=1,
-            )
-        )
-    with random_cols[1]:
-        random_max = int(
-            st.number_input(
-                "Max value",
-                min_value=-100,
-                max_value=100,
-                value=9,
-                step=1,
-            )
-        )
-    with random_cols[2]:
-        integers_only = st.toggle("Integers only", value=True)
-
-    random_fill_disabled = random_min > random_max
-    if random_fill_disabled:
-        st.warning("Min value must be less than or equal to max value.")
-
-    random_fill_clicked = st.button(
-        "Generate Random Matrix",
-        use_container_width=True,
-        disabled=random_fill_disabled,
-    )
-    if random_fill_clicked:
-        st.session_state.matrix_df = generate_random_dataframe(
-            row_count,
-            col_count,
-            random_min,
-            random_max,
-            integers_only,
-        )
-        st.session_state.result_payload = None
-
-    edited_df = st.data_editor(
-        st.session_state.matrix_df,
-        num_rows="fixed",
-        hide_index=True,
-        use_container_width=True,
-        column_config={
-            column: st.column_config.NumberColumn(
-                column,
-                format="%.4f",
-                step=0.5,
-            )
-            for column in st.session_state.matrix_df.columns
-        },
-    )
-    st.session_state.matrix_df = edited_df
-
-    decompose_clicked = st.button(
-        "Run Decomposition",
-        type="primary",
-        use_container_width=True,
-    )
-    st.markdown("</div>", unsafe_allow_html=True)
-
-try:
-    current_matrix = dataframe_to_matrix(st.session_state.matrix_df)
-    current_summary = summarize_matrix(current_matrix)
-    validation = validate_for_method(current_matrix, decomposition_name)
-except ValueError as exc:
-    current_matrix = None
-    current_summary = None
-    validation = {
-        "summary": None,
-        "requirements": METHOD_REQUIREMENTS[decomposition_name],
-        "errors": [str(exc)],
-        "warnings": [],
-        "is_valid": False,
-    }
-
-if decompose_clicked:
-    if not validation["is_valid"]:
-        st.session_state.result_payload = {
-            "kind": "error",
-            "message": "Please fix the matrix validation errors before decomposing.",
-        }
-    else:
+elif input_method == "CSV Upload":
+    uploaded = st.sidebar.file_uploader("Upload CSV (no header row)", type=["csv"])
+    if uploaded:
         try:
-            result = DECOMPOSITION_OPTIONS[decomposition_name]["fn"](current_matrix)
-            reconstruction = build_reconstruction(
-                decomposition_name,
-                result["components"],
-            )
-            reconstruction_error = None
-            if reconstruction is not None:
-                difference = np.array(current_matrix) - np.array(reconstruction)
-                reconstruction_error = float(np.max(np.abs(difference)))
+            df = pd.read_csv(uploaded, header=None)
+            ok, msg, matrix = validate_matrix(df.values)
+            if not ok:
+                st.sidebar.error(msg)
+        except Exception as e:
+            st.sidebar.error(f"Could not read CSV: {e}")
 
-            st.session_state.result_payload = {
-                "kind": "success",
-                "method_name": decomposition_name,
-                "result": result,
-                "matrix": current_matrix,
-                "reconstruction": reconstruction,
-                "reconstruction_error": reconstruction_error,
-            }
-        except ValueError as exc:
-            st.session_state.result_payload = {
-                "kind": "error",
-                "message": str(exc),
-            }
-        except Exception as exc:
-            st.session_state.result_payload = {
-                "kind": "error",
-                "message": f"Unable to decompose the matrix: {exc}",
-            }
-
-with right_col:
-    st.markdown('<div class="glass-panel">', unsafe_allow_html=True)
-    st.subheader("Validation and Results")
-
-    if current_summary is not None:
-        render_summary_cards(current_summary)
-        render_validation_panel(validation)
-    else:
-        st.error(validation["errors"][0])
-
-    payload = st.session_state.result_payload
-    if not payload:
-        st.markdown(
-            """
-            <div class="soft-note">
-                Fill the matrix, choose a method, and run the decomposition to see labeled
-                factors, matrix diagnostics, and a reconstruction quality check here.
-            </div>
-            """,
-            unsafe_allow_html=True,
+elif input_method == "Random Generation":
+    rand_rows = int(st.sidebar.number_input("Rows", 1, 20, 4, key="rr"))
+    rand_cols = int(st.sidebar.number_input("Columns", 1, 20, 4, key="rc"))
+    kind = st.sidebar.selectbox(
+        "Matrix type",
+        ["Random", "Square", "Symmetric Positive Definite"],
+    )
+    kind_map = {
+        "Random": "random",
+        "Square": "square",
+        "Symmetric Positive Definite": "spd",
+    }
+    if st.sidebar.button("Generate"):
+        st.session_state["rand_matrix"] = generate_random_matrix(
+            rand_rows, rand_cols, kind_map[kind]
         )
-    elif payload["kind"] == "error":
-        st.error(payload["message"])
-    else:
-        result = payload["result"]
-        st.success(result["message"])
+    if "rand_matrix" in st.session_state:
+        matrix = st.session_state["rand_matrix"]
 
-        if payload["reconstruction_error"] is not None:
-            st.info(
-                "Maximum reconstruction difference: "
-                f"{payload['reconstruction_error']:.8f}"
+st.sidebar.markdown("---")
+st.sidebar.header("2 · Decomposition")
+
+METHOD_NAMES = [
+    "LU Decomposition",
+    "QR Decomposition",
+    "Eigenvalue Decomposition",
+    "SVD",
+    "Cholesky Decomposition",
+    "PCA",
+]
+method = st.sidebar.selectbox("Choose method", METHOD_NAMES)
+
+n_pca = 2
+if method == "PCA":
+    max_k = min(matrix.shape) if matrix is not None else 2
+    n_pca = st.sidebar.slider("Principal components (k)", 1, max(max_k, 1), min(2, max_k))
+
+run_btn = st.sidebar.button("▶  Compute", type="primary", use_container_width=True)
+
+
+# ── page header ───────────────────────────────────────────────────────────────
+
+st.title("🧮 Matrix Decomposition Studio")
+st.markdown(
+    "Enter a matrix, pick a decomposition, then walk through **every single "
+    "calculation step** — the description, the formula, and the matrix state "
+    "at that exact moment, just like Python Tutor."
+)
+st.markdown("---")
+
+if matrix is None:
+    st.info("👈  Use the sidebar to enter or generate a matrix.")
+    st.stop()
+
+# ── input matrix display ──────────────────────────────────────────────────────
+
+st.subheader("Input Matrix")
+col_mat, col_heat = st.columns([1, 1.5])
+with col_mat:
+    show_matrix(matrix)
+    props = matrix_properties(matrix)
+    tags = "".join(f'<span class="prop-tag">{p}</span>' for p in props)
+    st.markdown(f'<div class="prop-row">{tags}</div>', unsafe_allow_html=True)
+with col_heat:
+    if st.checkbox("Show heatmap", value=True):
+        st.plotly_chart(plot_heatmap(matrix, "Input Matrix"), use_container_width=True)
+
+st.markdown("---")
+
+# ── run decomposition ─────────────────────────────────────────────────────────
+
+if run_btn:
+    # clear any previous step position so slider starts at 0
+    st.session_state.pop("current_step", None)
+
+    result = None
+    reconstruction = None
+    error_msg = None
+    exec_time = 0.0
+    formula_summary = ""
+    method_info = ""
+
+    try:
+        if method == "LU Decomposition":
+            result, exec_time = time_execution(compute_lu, matrix)
+            reconstruction = reconstruct_lu(result["L"], result["U"])
+            formula_summary = "A = L  ×  U"
+            method_info = (
+                "LU splits a square matrix into lower triangular L and upper "
+                "triangular U using Gaussian elimination. "
+                "Each step computes one multiplier and eliminates one row."
             )
 
-        tabs = st.tabs(["Input Matrix", "Decomposed Factors", "Reconstruction"])
+        elif method == "QR Decomposition":
+            result, exec_time = time_execution(compute_qr, matrix)
+            reconstruction = reconstruct_qr(result["Q"], result["R"])
+            formula_summary = "A = Q  ×  R"
+            method_info = (
+                "QR uses the Gram-Schmidt process: each column of A is made "
+                "orthogonal to all previous Q columns, then normalised. "
+                "Q is orthogonal and R is upper triangular."
+            )
 
-        with tabs[0]:
-            render_component("A", payload["matrix"])
+        elif method == "Eigenvalue Decomposition":
+            result, exec_time = time_execution(compute_eigen, matrix)
+            reconstruction = reconstruct_eigen(
+                result["Eigenvectors (V)"], result["Eigenvalues (Lambda)"]
+            )
+            formula_summary = "A = V  ×  Λ  ×  V⁻¹"
+            method_info = (
+                "Eigenvalue decomposition via QR iteration: repeatedly "
+                "QR-decompose A_k and reassemble as R*Q. "
+                "The diagonal converges to eigenvalues; accumulated Q columns become eigenvectors."
+            )
 
-        with tabs[1]:
-            for label, value in result["components"]:
-                render_component(label, value)
+        elif method == "SVD":
+            result, exec_time = time_execution(compute_svd, matrix)
+            reconstruction = reconstruct_svd(result["U"], result["Sigma"], result["V^T"])
+            formula_summary = "A = U  ×  Σ  ×  Vᵀ"
+            method_info = (
+                "SVD works for any m×n matrix. "
+                "Singular values are sqrt of eigenvalues of AᵀA. "
+                "V comes from eigenvectors of AᵀA; U is computed as U[:,i] = A·v_i / σ_i."
+            )
 
-        with tabs[2]:
-            if payload["reconstruction"] is None:
-                st.caption("Reconstruction is not available for this decomposition.")
-            else:
-                render_component("A (reconstructed)", payload["reconstruction"])
+        elif method == "Cholesky Decomposition":
+            result, exec_time = time_execution(compute_cholesky, matrix)
+            reconstruction = reconstruct_cholesky(
+                result["L (Lower Triangular)"], result["L^T (Upper Triangular)"]
+            )
+            formula_summary = "A = L  ×  Lᵀ"
+            method_info = (
+                "Cholesky requires the matrix to be symmetric and positive definite. "
+                "The Banachiewicz algorithm fills L entry by entry: "
+                "diagonal entries use a square root, off-diagonal use division."
+            )
 
-    st.markdown("</div>", unsafe_allow_html=True)
+        elif method == "PCA":
+            result, exec_time = time_execution(compute_pca, matrix, n_pca)
+            formula_summary = "X_pca = X_centered  ×  W"
+            method_info = (
+                "PCA finds the directions of maximum variance. "
+                "Steps: centre → covariance matrix → eigendecompose → pick top-k → project. "
+                "Explained variance tells you how much information each component keeps."
+            )
+
+    except ValueError as ve:
+        error_msg = str(ve)
+    except Exception as ex:
+        error_msg = f"Unexpected error: {ex}"
+
+    if error_msg:
+        st.error(f"**{method} failed:** {error_msg}")
+        st.stop()
+
+    # store everything in session state so the page doesn't re-run computation
+    # when the user just moves the slider
+    st.session_state["result"]        = result
+    st.session_state["reconstruction"] = reconstruction
+    st.session_state["exec_time"]     = exec_time
+    st.session_state["formula_summary"] = formula_summary
+    st.session_state["method_info"]   = method_info
+    st.session_state["active_method"] = method
+    st.session_state["current_step"]  = 0
+
+
+# ── display results (only if we have stored data) ─────────────────────────────
+
+if "result" not in st.session_state:
+    st.info("Choose a method in the sidebar and click ▶ Compute.")
+    st.stop()
+
+result          = st.session_state["result"]
+reconstruction  = st.session_state["reconstruction"]
+exec_time       = st.session_state["exec_time"]
+formula_summary = st.session_state["formula_summary"]
+method_info     = st.session_state["method_info"]
+active_method   = st.session_state["active_method"]
+steps           = result.get("_steps", [])
+
+SKIP = {"_steps", "_explained", "_n_components"}
+output_items = [(k, v) for k, v in result.items() if k not in SKIP]
+
+# ── method header ─────────────────────────────────────────────────────────────
+
+st.subheader(f"Results — {active_method}")
+st.info(method_info)
+st.code(f"Formula:  {formula_summary}", language=None)
+st.caption(f"Computed in {exec_time * 1000:.2f} ms")
+
+# ── output matrices ───────────────────────────────────────────────────────────
+
+st.markdown("#### Factorised Matrices")
+num_cols = min(len(output_items), 4)
+out_cols = st.columns(num_cols)
+for i, (name, mat) in enumerate(output_items):
+    with out_cols[i % num_cols]:
+        show_matrix(mat, label=name)
+
+# ── heatmaps toggle ───────────────────────────────────────────────────────────
+
+if st.checkbox("Show heatmaps of output matrices"):
+    h_cols = st.columns(min(len(output_items), 4))
+    for i, (name, mat) in enumerate(output_items):
+        arr = np.array(mat)
+        if arr.ndim == 1:
+            arr = arr.reshape(1, -1)
+        if arr.ndim == 2 and not np.iscomplexobj(arr):
+            with h_cols[i % len(h_cols)]:
+                st.plotly_chart(plot_heatmap(arr, name), use_container_width=True)
+
+# ── explained variance for PCA ────────────────────────────────────────────────
+
+if active_method == "PCA" and "_explained" in result:
+    st.markdown("#### Explained Variance")
+    st.plotly_chart(plot_explained_variance(result["_explained"]), use_container_width=True)
+
+# ── reconstruction check ──────────────────────────────────────────────────────
+
+if reconstruction is not None:
+    st.markdown("---")
+    st.markdown("#### Verification  —  reconstructed A from the factors")
+    ok = np.allclose(matrix, reconstruction, atol=1e-3)
+    if ok:
+        st.success("Reconstruction matches the original matrix (within numerical precision).")
+    else:
+        st.warning("Small numerical difference in reconstruction — expected for ill-conditioned matrices.")
+    if st.checkbox("Show reconstructed matrix"):
+        show_matrix(reconstruction, label="Reconstructed A")
+
+# ── download ──────────────────────────────────────────────────────────────────
+
+st.markdown("---")
+st.markdown("#### Download Results")
+dl_cols = st.columns(min(len(output_items), 4))
+for i, (name, mat) in enumerate(output_items):
+    arr = np.array(mat)
+    if arr.ndim == 1:
+        arr = arr.reshape(1, -1)
+    if arr.ndim == 2:
+        if np.iscomplexobj(arr):
+            csv = pd.DataFrame(arr).astype(str).to_csv(index=False, header=False)
+        else:
+            csv = pd.DataFrame(arr).to_csv(index=False, header=False)
+        safe_name = name.lower().replace(" ", "_").replace("(", "").replace(")", "").replace("^", "")
+        with dl_cols[i % len(dl_cols)]:
+            st.download_button(
+                label=f"⬇ {name}",
+                data=csv,
+                file_name=f"{safe_name}.csv",
+                mime="text/csv",
+                key=f"dl_{name}",
+            )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PYTHON-TUTOR STYLE STEP WALKTHROUGH
+# ══════════════════════════════════════════════════════════════════════════════
+
+st.markdown("---")
+st.subheader("🔍 Step-by-Step Walkthrough")
+st.markdown(
+    "Move through each calculation step one at a time. "
+    "Each step shows **what is happening**, **the exact formula**, "
+    "and the **matrix state at that exact moment** with the changed cell highlighted."
+)
+
+if not steps:
+    st.info("No step data available for this method.")
+    st.stop()
+
+total_steps = len(steps)
+
+# ── navigation: use session state to track current step ──────────────────────
+# We do NOT use st.slider as the source of truth because moving it reruns
+# the whole app and the slider value resets. Instead we store the index in
+# session_state and have Prev / Next buttons update it, plus a number_input
+# that also drives it cleanly.
+
+if "current_step" not in st.session_state:
+    st.session_state["current_step"] = 0
+
+def go_prev():
+    if st.session_state["current_step"] > 0:
+        st.session_state["current_step"] -= 1
+
+def go_next():
+    if st.session_state["current_step"] < total_steps - 1:
+        st.session_state["current_step"] += 1
+
+# navigation row
+nav_left, nav_mid, nav_right = st.columns([1, 2, 1])
+
+with nav_left:
+    st.button("◀  Previous", on_click=go_prev, disabled=(st.session_state["current_step"] == 0))
+
+with nav_mid:
+    # number_input lets the user type a specific step number too
+    chosen = st.number_input(
+        f"Step (1 – {total_steps})",
+        min_value=1,
+        max_value=total_steps,
+        value=st.session_state["current_step"] + 1,
+        step=1,
+        key="step_number",
+    )
+    st.session_state["current_step"] = int(chosen) - 1
+
+with nav_right:
+    st.button("Next  ▶", on_click=go_next, disabled=(st.session_state["current_step"] == total_steps - 1))
+
+# progress bar
+progress_pct = (st.session_state["current_step"]) / max(total_steps - 1, 1)
+st.progress(progress_pct)
+
+idx  = st.session_state["current_step"]
+step = steps[idx]
+
+# ── step info panel (Python-Tutor style dark code box) ───────────────────────
+
+desc_text    = step.get("desc", "")
+formula_text = step.get("formula", "")
+
+st.markdown(
+    f'<div class="tutor-step-header">▸  STEP {idx + 1} / {total_steps}</div>'
+    f'<div class="tutor-step-body">{desc_text}</div>',
+    unsafe_allow_html=True,
+)
+st.markdown(
+    f'<div class="tutor-formula-header">⟹  FORMULA</div>'
+    f'<div class="tutor-formula-body">{formula_text}</div>',
+    unsafe_allow_html=True,
+)
+
+st.markdown('<div class="tutor-section"></div>', unsafe_allow_html=True)
+
+# ── matrices present in this step ────────────────────────────────────────────
+
+# each key maps to a display label
+STEP_MATRIX_KEYS = [
+    ("L",      "L  (lower triangular)"),
+    ("U",      "U  (upper triangular)"),
+    ("Q",      "Q  (orthogonal)"),
+    ("R",      "R  (upper triangular)"),
+    ("A_k",    "A_k  (current iteration)"),
+    ("V",      "V  (eigenvectors / principal components)"),
+    ("matrix", step.get("label", "Matrix")),
+]
+
+highlight_cell = step.get("highlight")      # (row, col) tuple
+highlight_col  = step.get("highlight_col")  # column index
+
+to_render = []
+for key, label in STEP_MATRIX_KEYS:
+    if key in step:
+        arr = np.array(step[key], dtype=float)
+        to_render.append((label, arr))
+
+if to_render:
+    mat_cols = st.columns(min(len(to_render), 3))
+    for i, (label, arr) in enumerate(to_render):
+        with mat_cols[i % len(mat_cols)]:
+            if arr.ndim == 1:
+                arr = arr.reshape(1, -1)
+            show_matrix(arr, label=label)
+            # only show heatmap when matrix is 2-D and bigger than 1×1
+            if arr.ndim == 2 and arr.shape[0] > 1 and arr.shape[1] > 1:
+                fig = plot_heatmap_highlighted(arr, label, highlight_cell, highlight_col)
+                st.plotly_chart(fig, use_container_width=True)
+
+# ── eigenvalues / extra info line ─────────────────────────────────────────────
+
+if "eigenvalues" in step:
+    ev = np.round(np.array(step["eigenvalues"]), 4)
+    st.markdown(f"**Values at this step:** `{ev.tolist()}`")
+
+if "extra" in step:
+    st.info(step["extra"])
